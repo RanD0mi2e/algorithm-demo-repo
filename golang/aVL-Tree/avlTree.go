@@ -1,4 +1,4 @@
-package avlTree
+package AVLTree
 
 type AVLTree struct {
 	root *TreeNode
