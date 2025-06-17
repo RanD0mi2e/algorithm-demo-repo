@@ -1,12 +1,12 @@
 package main
 
 import (
-	primefactor "algorithm/prime-factor"
+	"algorithm/fibonacci"
 	"fmt"
 )
 
 func main() {
-
-	res := primefactor.GetPrimeFactorSequence(9)
+	mtx := fibonacci.Matrix{A: 1, B: 1, C: 1, D: 0}
+	res := fibonacci.GetNthFibonacciNumByMatrix(5, mtx)
 	fmt.Println(res)
 }
