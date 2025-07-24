@@ -1,0 +1,23 @@
+mode: set
+algorithm/heap/max-heap/max_heap.go:7.41,11.2 1 1
+algorithm/heap/max-heap/max_heap.go:13.40,15.2 1 1
+algorithm/heap/max-heap/max_heap.go:17.41,19.2 1 1
+algorithm/heap/max-heap/max_heap.go:21.37,23.2 1 1
+algorithm/heap/max-heap/max_heap.go:25.31,26.47 1 1
+algorithm/heap/max-heap/max_heap.go:26.47,29.3 2 1
+algorithm/heap/max-heap/max_heap.go:32.31,33.35 1 1
+algorithm/heap/max-heap/max_heap.go:33.35,35.88 2 1
+algorithm/heap/max-heap/max_heap.go:35.88,37.4 1 1
+algorithm/heap/max-heap/max_heap.go:38.3,38.36 1 1
+algorithm/heap/max-heap/max_heap.go:38.36,39.9 1 1
+algorithm/heap/max-heap/max_heap.go:41.3,42.15 2 1
+algorithm/heap/max-heap/max_heap.go:46.30,48.2 1 1
+algorithm/heap/max-heap/max_heap.go:50.35,53.2 2 1
+algorithm/heap/max-heap/max_heap.go:55.44,56.19 1 1
+algorithm/heap/max-heap/max_heap.go:56.19,58.3 1 1
+algorithm/heap/max-heap/max_heap.go:59.2,62.18 4 1
+algorithm/heap/max-heap/max_heap.go:62.18,64.3 1 1
+algorithm/heap/max-heap/max_heap.go:65.2,65.18 1 1
+algorithm/heap/max-heap/max_heap.go:68.38,69.19 1 1
+algorithm/heap/max-heap/max_heap.go:69.19,71.3 1 1
+algorithm/heap/max-heap/max_heap.go:72.2,72.24 1 1
