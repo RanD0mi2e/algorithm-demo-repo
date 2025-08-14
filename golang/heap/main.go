@@ -13,13 +13,12 @@ func main() {
 	// output := topk.TopK(input, 3)
 	// fmt.Printf("result: %v", output)
 
-	mf := Mf.NewMedianFinder()
-	mf.AddNumber(5)
-	mf.AddNumber(1)
-	mf.AddNumber(3)
-	mf.AddNumber(8)
-	mf.AddNumber(7)
-	mf.AddNumber(0)
-	output := mf.GetMedian()
-	fmt.Printf("result: %f", output)
+	mf := Mf.Constructor()
+	mf.AddNum(3)
+	mf.AddNum(2)
+	result1 := mf.FindMedian()
+	fmt.Printf("result1: %v\n", result1) // expect 1.5
+	mf.AddNum(1)
+	result2 := mf.FindMedian()
+	fmt.Printf("result2: %v\n", result2) // expect 2
 }

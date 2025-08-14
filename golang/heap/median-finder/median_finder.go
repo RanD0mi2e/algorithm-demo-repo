@@ -4,104 +4,108 @@ import "container/heap"
 
 type MinHeap []int
 
-func (h *MinHeap) Len() int { return len(*h) }
-
-func (h *MinHeap) Less(i, j int) bool {
-	return (*h)[i] < (*h)[j]
+func (mh MinHeap) Less(i, j int) bool {
+	return mh[i] < mh[j]
 }
 
-func (h *MinHeap) Pop() interface{} {
-	n := len(*h)
-	x := (*h)[n-1]
-	*h = (*h)[:n-1]
-	return x
+func (mh MinHeap) Swap(i, j int) {
+	mh[i], mh[j] = mh[j], mh[i]
 }
 
-func (h *MinHeap) Push(val interface{}) {
-	*h = append(*h, val.(int))
+func (mh MinHeap) Len() int {
+	return len(mh)
 }
 
-func (h *MinHeap) Swap(i, j int) {
-	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+func (mh *MinHeap) Pop() any {
+	old := *mh
+	n := len(old)
+	item := old[n-1]
+	*mh = old[0 : n-1]
+	return item
 }
 
-func (h *MinHeap) Peek() int {
-	return (*h)[0]
+func (mh *MinHeap) Push(x any) {
+	*mh = append(*mh, x.(int))
+}
+
+func (mh MinHeap) Peek() int {
+	return mh[0]
 }
 
 type MaxHeap []int
 
-func (h *MaxHeap) Len() int { return len(*h) }
-
-func (h *MaxHeap) Less(i, j int) bool {
-	return (*h)[i] > (*h)[j]
+func (mh MaxHeap) Less(i, j int) bool {
+	return mh[i] > mh[j]
 }
 
-func (h *MaxHeap) Pop() any {
-	n := len(*h)
-	x := (*h)[n-1]
-	*h = (*h)[:n-1]
-	return x
+func (mh MaxHeap) Swap(i, j int) {
+	mh[i], mh[j] = mh[j], mh[i]
 }
 
-func (h *MaxHeap) Push(val any) {
-	*h = append(*h, val.(int))
+func (mh MaxHeap) Len() int {
+	return len(mh)
 }
 
-func (h *MaxHeap) Swap(i, j int) {
-	(*h)[i], (*h)[j] = (*h)[j], (*h)[i]
+func (mh *MaxHeap) Pop() any {
+	old := *mh
+	n := len(old)
+	item := old[n-1]
+	*mh = old[0 : n-1]
+	return item
 }
 
-func (h *MaxHeap) Peek() int {
-	return (*h)[0]
+func (mh *MaxHeap) Push(x any) {
+	*mh = append(*mh, x.(int))
+}
+
+func (mh MaxHeap) Peek() int {
+	return mh[0]
 }
 
 type MedianFinder struct {
-	minheap *MinHeap
-	maxheap *MaxHeap
+	MinHeap *MinHeap
+	MaxHeap *MaxHeap
 }
 
-func NewMedianFinder() *MedianFinder {
-	minheap := &MinHeap{}
-	maxheap := &MaxHeap{}
-	heap.Init(minheap)
-	heap.Init(maxheap)
-	return &MedianFinder{
-		minheap: minheap,
-		maxheap: maxheap,
+func Constructor() MedianFinder {
+	minHp := &MinHeap{}
+	maxHp := &MaxHeap{}
+	heap.Init(minHp)
+	heap.Init(maxHp)
+
+	return MedianFinder{
+		MinHeap: minHp,
+		MaxHeap: maxHp,
 	}
 }
 
-func (mf *MedianFinder) Balance() {
-	minLen, maxLen := len(*mf.minheap), len(*mf.maxheap)
-	if maxLen > minLen+1 {
-		val := heap.Pop(mf.maxheap).(int)
-		heap.Push(mf.minheap, val)
-	} else if minLen > maxLen+1 {
-		val := heap.Pop(mf.minheap).(int)
-		heap.Push(mf.maxheap, val)
-	}
-}
-
-func (mf *MedianFinder) AddNumber(val int) {
-	maxLen := len(*mf.maxheap)
-	if maxLen == 0 || val <= (*mf.maxheap)[0] {
-		heap.Push(mf.maxheap, val)
+func (this *MedianFinder) AddNum(num int) {
+	if len(*this.MaxHeap) == 0 || num < this.MaxHeap.Peek() {
+		heap.Push(this.MaxHeap, num)
 	} else {
-		heap.Push(mf.minheap, val)
+		heap.Push(this.MinHeap, num)
 	}
-	mf.Balance()
+	this.Balance()
 }
 
-func (mf *MedianFinder) GetMedian() float64 {
-	var result float64
-	minLen, maxLen := (*mf.minheap).Len(), (*mf.maxheap).Len()
-	if minLen == maxLen {
-		result = float64((*mf.minheap).Peek()+(*mf.maxheap).Peek()) / 2.0
-	} else if minLen > maxLen {
-		result = float64((*mf.minheap).Peek())
-	} else {
-		result = float64((*mf.maxheap).Peek())
+func (this *MedianFinder) Balance() {
+	minHeapLen, maxHeapLen := len(*this.MinHeap), len(*this.MaxHeap)
+	if maxHeapLen > minHeapLen+1 {
+		val := heap.Pop(this.MaxHeap).(int)
+		heap.Push(this.MinHeap, val)
+	} else if minHeapLen > maxHeapLen+1 {
+		val := heap.Pop(this.MinHeap).(int)
+		heap.Push(this.MaxHeap, val)
 	}
-	return result
+}
+
+func (this *MedianFinder) FindMedian() float64 {
+	minL, maxL := len(*this.MinHeap), len(*this.MaxHeap)
+	if minL == maxL {
+		return (float64(this.MinHeap.Peek()) + float64(this.MaxHeap.Peek())) / 2
+	} else if minL > maxL {
+		return float64(this.MinHeap.Peek())
+	} else {
+		return float64(this.MaxHeap.Peek())
+	}
 }
