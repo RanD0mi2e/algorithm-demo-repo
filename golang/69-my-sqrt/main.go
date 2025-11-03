@@ -38,3 +38,26 @@ func mySqrt(x int) int {
 	}
 	return int(x0)
 }
+
+// 二分法
+func mySqrt2(x int) int {
+	if x < 0 {
+		return -1
+	}
+	if x < 2 {
+		return x
+	}
+	left, right := 0, x
+	for left < right {
+		mid := left + (right-left)/2
+		square := mid * mid
+		if square > x {
+			right = mid
+		} else if square < x {
+			left = mid + 1
+		} else {
+			return mid
+		}
+	}
+	return left - 1
+}
