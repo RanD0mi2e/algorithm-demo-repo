@@ -6,9 +6,64 @@
 
 ---
 
-## 一、核心数据模型
+## 一、系统架构概览
 
-### 1.1 工作流定义
+### 1.1 架构图
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            API Gateway                                   │
+│                    (认证、限流、路由、日志)                                │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         Workflow API Layer                               │
+│              (REST API / gRPC / GraphQL 接口层)                          │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+        ┌───────────────────────────┼───────────────────────────┐
+        ▼                           ▼                           ▼
+┌───────────────┐          ┌───────────────┐          ┌───────────────┐
+│  流程定义服务  │          │  流程执行引擎  │          │   任务管理服务  │
+│ (Definition)  │          │  (Execution)  │          │    (Task)     │
+└───────────────┘          └───────────────┘          └───────────────┘
+        │                           │                           │
+        └───────────────────────────┼───────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Core Domain Layer                               │
+│    ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
+│    │ 状态机   │  │ 条件引擎  │  │ 审批策略  │  │ 事件总线  │              │
+│    └──────────┘  └──────────┘  └──────────┘  └──────────┘              │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Infrastructure Layer                              │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐    │
+│  │ MySQL  │ │ Redis  │ │  MQ    │ │ 分布式锁│ │ 日志   │ │ 监控   │    │
+│  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 核心组件说明
+
+| 组件 | 职责 | 技术选型 |
+|------|------|----------|
+| API Gateway | 统一入口、认证鉴权、限流熔断 | Kong/Nginx |
+| 流程定义服务 | 流程模板的CRUD、版本管理、验证 | Go Service |
+| 流程执行引擎 | 流程实例的创建、状态流转、并发控制 | Go Service |
+| 任务管理服务 | 任务分配、查询、超时监控 | Go Service |
+| 事件总线 | 解耦各模块、异步通知 | Kafka/RabbitMQ |
+| 分布式锁 | 并发控制、幂等保证 | Redis/etcd |
+
+---
+
+## 二、核心数据模型
+
+### 2.1 工作流定义
 
 ```go
 // 工作流定义
@@ -23,6 +78,15 @@ type Workflow struct {
     CreatedAt   time.Time
     UpdatedAt   time.Time
     Status      string       // Active/Inactive/Archived
+}
+
+// 流程变量定义
+type Variable struct {
+    Name         string      // 变量名
+    Type         string      // 类型：string/number/boolean/object/array
+    DefaultValue interface{} // 默认值
+    Required     bool        // 是否必填
+    Description  string      // 描述
 }
 
 // 节点类型
@@ -89,7 +153,7 @@ type TimeoutRule struct {
 }
 ```
 
-### 1.2 流程实例
+### 2.2 流程实例
 
 ```go
 // 流程实例
@@ -120,7 +184,7 @@ const (
 )
 ```
 
-### 1.3 任务
+### 2.3 任务
 
 ```go
 // 任务
@@ -151,7 +215,7 @@ const (
 )
 ```
 
-### 1.4 历史记录
+### 2.4 历史记录
 
 ```go
 // 历史记录
@@ -170,9 +234,56 @@ type HistoryLog struct {
 }
 ```
 
+### 2.5 流程令牌（用于并行网关）
+
+```go
+// ProcessToken 流程令牌，用于跟踪并行分支的执行状态
+type ProcessToken struct {
+    ID          string
+    InstanceID  string    // 所属流程实例
+    NodeID      string    // 当前所在节点
+    ParentToken string    // 父令牌ID（用于嵌套并行）
+    Status      string    // active/completed/canceled
+    CreatedAt   time.Time
+    CompletedAt *time.Time
+}
+```
+
+### 2.6 任务委托记录
+
+```go
+// TaskDelegation 任务委托记录
+type TaskDelegation struct {
+    ID        string
+    TaskID    string    // 被委托的任务
+    FromUser  string    // 委托人
+    ToUser    string    // 被委托人
+    Comment   string    // 委托说明
+    CreatedAt time.Time
+}
+```
+
+### 2.7 流程关系（用于子流程）
+
+```go
+// ProcessRelation 流程关系，用于子流程关联
+type ProcessRelation struct {
+    ID               string
+    ParentInstanceID string    // 父流程实例ID
+    ChildInstanceID  string    // 子流程实例ID
+    ParentNodeID     string    // 父流程中触发子流程的节点
+    Type             string    // subprocess/call_activity
+    Status           string    // running/completed/failed
+    CreatedAt        time.Time
+    CompletedAt      *time.Time
+}
+```
+
 ---
 
-## 二、核心引擎接口
+## 三、核心引擎接口
+
+### 3.1 工作流引擎主接口
 
 ```go
 // WorkflowEngine 工作流引擎接口
@@ -217,11 +328,150 @@ type InstanceFilter struct {
 }
 ```
 
+### 3.2 仓储接口定义
+
+```go
+// WorkflowRepository 工作流定义仓储
+type WorkflowRepository interface {
+    Save(workflow *Workflow) error
+    GetByID(id string) (*Workflow, error)
+    GetByNameAndVersion(name, version string) (*Workflow, error)
+    List(filter WorkflowFilter) ([]*Workflow, error)
+    Update(workflow *Workflow) error
+    Delete(id string) error
+}
+
+// InstanceRepository 流程实例仓储
+type InstanceRepository interface {
+    Save(instance *WorkflowInstance) error
+    GetByID(id string) (*WorkflowInstance, error)
+    Update(instance *WorkflowInstance) error
+    List(filter InstanceFilter) ([]*WorkflowInstance, error)
+    CountByStatus(status InstanceStatus) (int64, error)
+    Ping() error // 健康检查
+}
+
+// TaskRepository 任务仓储
+type TaskRepository interface {
+    Save(task *Task) error
+    GetByID(id string) (*Task, error)
+    Update(task *Task) error
+    FindByAssignee(userID string, status TaskStatus) ([]*Task, error)
+    FindByRoles(roles []string, status TaskStatus) ([]*Task, error)
+    FindByNodeAndInstance(nodeID, instanceID string) ([]*Task, error)
+    FindOverdueTasks() ([]*Task, error)
+    CountPendingByUser(userID string) (int64, error)
+}
+
+// HistoryRepository 历史记录仓储
+type HistoryRepository interface {
+    Add(log *HistoryLog) error
+    GetByInstanceID(instanceID string) ([]*HistoryLog, error)
+    GetByTaskID(taskID string) ([]*HistoryLog, error)
+}
+
+// TokenRepository 流程令牌仓储
+type TokenRepository interface {
+    Save(token *ProcessToken) error
+    GetByID(id string) (*ProcessToken, error)
+    FindByNodeID(nodeID string) ([]*ProcessToken, error)
+    FindByInstanceID(instanceID string) ([]*ProcessToken, error)
+    Update(token *ProcessToken) error
+}
+
+// RelationRepository 流程关系仓储
+type RelationRepository interface {
+    Save(relation *ProcessRelation) error
+    GetByChildID(childInstanceID string) (*ProcessRelation, error)
+    FindByParentID(parentInstanceID string) ([]*ProcessRelation, error)
+}
+```
+
+### 3.3 外部服务接口
+
+```go
+// UserService 用户服务接口
+type UserService interface {
+    GetUser(userID string) (*User, error)
+    GetUsersByRole(roleID string) []string
+    GetUserRoles(userID string) []string
+    GetUserManager(userID string) (string, error)
+}
+
+// OrganizationService 组织架构服务接口
+type OrganizationService interface {
+    GetUsersByDepartment(deptID string) []string
+    GetDepartmentManager(deptID string) (string, error)
+    GetUserDepartment(userID string) (string, error)
+}
+
+// Notifier 通知服务接口
+type Notifier interface {
+    Notify(userID string, message string) error
+    NotifyBatch(userIDs []string, message string) error
+    SendEmail(to, subject, body string) error
+    SendSMS(phone, message string) error
+}
+
+// User 用户信息
+type User struct {
+    ID         string
+    Name       string
+    Email      string
+    Phone      string
+    Department string
+    Roles      []string
+}
+```
+
+### 3.4 分布式锁接口
+
+```go
+// DistributedLock 分布式锁接口
+type DistributedLock interface {
+    // Lock 获取锁，返回锁标识
+    Lock(key string, ttl time.Duration) (string, error)
+    // Unlock 释放锁
+    Unlock(key string, token string) error
+    // Renew 续期
+    Renew(key string, token string, ttl time.Duration) error
+}
+
+// RedisDistributedLock Redis实现的分布式锁
+type RedisDistributedLock struct {
+    client *redis.Client
+}
+
+func (l *RedisDistributedLock) Lock(key string, ttl time.Duration) (string, error) {
+    token := generateID()
+    ok, err := l.client.SetNX(context.Background(), "lock:"+key, token, ttl).Result()
+    if err != nil {
+        return "", err
+    }
+    if !ok {
+        return "", ErrLockFailed
+    }
+    return token, nil
+}
+
+func (l *RedisDistributedLock) Unlock(key string, token string) error {
+    script := `
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+    `
+    _, err := l.client.Eval(context.Background(), script, []string{"lock:" + key}, token).Result()
+    return err
+}
+```
+
 ---
 
-## 三、核心设计模式
+## 四、核心设计模式
 
-### 3.1 状态机模式
+### 4.1 状态机模式
 
 每个流程实例都是一个状态机，节点代表状态，转换代表状态变化的触发条件。
 
@@ -248,7 +498,7 @@ func (sm *StateMachine) Transit(action string, variables map[string]interface{})
 }
 ```
 
-### 3.2 责任链模式
+### 4.2 责任链模式
 
 处理多级审批、会签等场景。
 
@@ -278,7 +528,7 @@ func (h *SequentialApprovalHandler) Handle(task *Task) error {
 }
 ```
 
-### 3.3 策略模式
+### 4.3 策略模式
 
 不同的审批模式（单人、会签、或签）使用不同的策略。
 
@@ -323,16 +573,16 @@ func (s *OrSignStrategy) IsComplete(tasks []*Task) bool {
 
 ---
 
-## 四、核心功能模块
+## 五、核心功能模块
 
-### 4.1 流程定义管理
+### 5.1 流程定义管理
 
 - **可视化设计器**：拖拽式流程设计
 - **JSON/XML定义**：支持代码化定义
 - **版本管理**：支持多版本并存，灰度发布
 - **导入导出**：流程定义的备份和迁移
 
-### 4.2 流程执行引擎
+### 5.2 流程执行引擎
 
 ```go
 type ExecutionEngine struct {
@@ -340,11 +590,37 @@ type ExecutionEngine struct {
     instanceRepo   InstanceRepository
     taskRepo       TaskRepository
     historyRepo    HistoryRepository
+    tokenRepo      TokenRepository      // 流程令牌仓储（并行网关用）
+    relationRepo   RelationRepository   // 流程关系仓储（子流程用）
     eventBus       EventBus
     conditionEval  ConditionEvaluator
+    locker         DistributedLock      // 分布式锁
+    idGenerator    IDGenerator          // ID生成器
+}
+
+// IDGenerator ID生成器接口
+type IDGenerator interface {
+    Generate() string
+}
+
+// 辅助函数
+func generateID() string {
+    return uuid.New().String()
+}
+
+func timePtr(t time.Time) *time.Time {
+    return &t
 }
 
 func (e *ExecutionEngine) StartProcess(workflowID string, documentID string, initiator string, variables map[string]interface{}) (*WorkflowInstance, error) {
+    // 幂等性检查：防止重复创建
+    lockKey := fmt.Sprintf("start_process:%s:%s", workflowID, documentID)
+    token, err := e.locker.Lock(lockKey, 30*time.Second)
+    if err != nil {
+        return nil, fmt.Errorf("failed to acquire lock: %w", err)
+    }
+    defer e.locker.Unlock(lockKey, token)
+    
     // 1. 加载工作流定义
     workflow, err := e.workflowRepo.GetByID(workflowID)
     if err != nil {
@@ -383,10 +659,23 @@ func (e *ExecutionEngine) StartProcess(workflowID string, documentID string, ini
 }
 
 func (e *ExecutionEngine) CompleteTask(taskID string, userID string, action string, comment string, variables map[string]interface{}) error {
+    // 幂等性检查
+    lockKey := fmt.Sprintf("complete_task:%s", taskID)
+    token, err := e.locker.Lock(lockKey, 30*time.Second)
+    if err != nil {
+        return fmt.Errorf("failed to acquire lock: %w", err)
+    }
+    defer e.locker.Unlock(lockKey, token)
+    
     // 1. 加载任务
     task, err := e.taskRepo.GetByID(taskID)
     if err != nil {
         return err
+    }
+    
+    // 检查任务是否已完成（幂等）
+    if task.Status == TaskCompleted {
+        return nil // 已完成，直接返回
     }
     
     // 2. 验证权限
@@ -434,7 +723,7 @@ func (e *ExecutionEngine) CompleteTask(taskID string, userID string, action stri
 }
 ```
 
-### 4.3 任务管理
+### 5.3 任务管理
 
 ```go
 type TaskManager struct {
@@ -492,7 +781,7 @@ func (tm *TaskManager) DelegateTask(taskID string, fromUser string, toUser strin
 }
 ```
 
-### 4.4 审批人解析
+### 5.4 审批人解析
 
 ```go
 type AssigneeResolver interface {
@@ -542,7 +831,7 @@ func (r *DefaultAssigneeResolver) Resolve(rule *AssigneeRule, instance *Workflow
 }
 ```
 
-### 4.5 条件评估引擎
+### 5.5 条件评估引擎
 
 ```go
 type ConditionEvaluator interface {
@@ -579,9 +868,9 @@ func (e *ExpressionEvaluator) Evaluate(condition string, variables map[string]in
 
 ---
 
-## 五、特殊场景处理
+## 六、特殊场景处理
 
-### 5.1 条件分支
+### 6.1 条件分支
 
 根据流程变量自动选择路由：
 
@@ -612,7 +901,7 @@ func (e *ExecutionEngine) handleConditionNode(node *Node, instance *WorkflowInst
 }
 ```
 
-### 5.2 并行网关（会签）
+### 6.2 并行网关（会签）
 
 ```go
 // 并行网关 - 分支
@@ -661,7 +950,7 @@ func (e *ExecutionEngine) handleParallelGatewayJoin(node *Node, instance *Workfl
 }
 ```
 
-### 5.3 子流程
+### 6.3 子流程
 
 ```go
 type SubProcessNode struct {
@@ -701,7 +990,7 @@ func (e *ExecutionEngine) handleSubProcess(node *SubProcessNode, instance *Workf
 }
 ```
 
-### 5.4 超时处理
+### 6.4 超时处理
 
 ```go
 type TimeoutMonitor struct {
@@ -754,7 +1043,7 @@ func (tm *TimeoutMonitor) checkTimeouts() {
 }
 ```
 
-### 5.5 加签/减签
+### 6.5 加签/减签
 
 ```go
 // 加签（增加审批人）
@@ -788,7 +1077,7 @@ func (e *ExecutionEngine) AddSign(taskID string, users []string, mode string) er
 }
 ```
 
-### 5.6 退回/回退
+### 6.6 退回/回退
 
 ```go
 func (e *ExecutionEngine) Rollback(instanceID string, targetNodeID string, reason string) error {
@@ -827,9 +1116,9 @@ func (e *ExecutionEngine) Rollback(instanceID string, targetNodeID string, reaso
 
 ---
 
-## 六、数据库设计
+## 七、数据库设计
 
-### 6.1 表结构
+### 7.1 表结构
 
 ```sql
 -- 工作流定义表
@@ -937,7 +1226,7 @@ CREATE TABLE process_relations (
 
 ---
 
-## 七、事件驱动架构
+## 八、事件驱动架构
 
 ```go
 type Event interface {
@@ -1005,7 +1294,7 @@ func setupEventHandlers(bus EventBus, notifier Notifier) {
 
 ---
 
-## 八、API接口设计
+## 九、API接口设计
 
 ```go
 // REST API路由
@@ -1141,9 +1430,9 @@ func (api *WorkflowAPI) Rollback(c *gin.Context) {
 
 ---
 
-## 九、性能优化
+## 十、性能优化
 
-### 9.1 缓存策略
+### 10.1 缓存策略
 
 ```go
 type CachedWorkflowEngine struct {
@@ -1175,7 +1464,7 @@ func (c *CachedWorkflowEngine) GetWorkflow(workflowID string) (*Workflow, error)
 }
 ```
 
-### 9.2 异步处理
+### 10.2 异步处理
 
 ```go
 type AsyncExecutionEngine struct {
@@ -1207,7 +1496,7 @@ func (a *AsyncExecutionEngine) startWorkers(workerCount int) {
 }
 ```
 
-### 9.3 批量查询优化
+### 10.3 批量查询优化
 
 ```go
 func (r *TaskRepository) FindByAssignees(userIDs []string, status TaskStatus) ([]*Task, error) {
@@ -1225,16 +1514,16 @@ func (r *TaskRepository) FindByAssignees(userIDs []string, status TaskStatus) ([
 
 ---
 
-## 十、监控与运维
+## 十一、监控与运维
 
-### 10.1 监控指标
+### 11.1 监控指标
 
 - **流程指标**：启动数、完成数、拒绝数、平均耗时
 - **任务指标**：待办数、超时数、完成率
 - **性能指标**：响应时间、吞吐量、并发数
 - **异常指标**：错误率、超时率
 
-### 10.2 日志记录
+### 11.2 日志记录
 
 ```go
 type WorkflowLogger struct {
@@ -1258,7 +1547,7 @@ func (l *WorkflowLogger) LogTaskComplete(task *Task) {
 }
 ```
 
-### 10.3 健康检查
+### 11.3 健康检查
 
 ```go
 func (api *WorkflowAPI) HealthCheck(c *gin.Context) {
@@ -1284,9 +1573,9 @@ func (api *WorkflowAPI) HealthCheck(c *gin.Context) {
 
 ---
 
-## 十一、扩展性设计
+## 十二、扩展性设计
 
-### 11.1 插件系统
+### 12.1 插件系统
 
 ```go
 type Plugin interface {
@@ -1317,7 +1606,7 @@ func (pm *PluginManager) ExecuteHook(hookName string, data interface{}) {
 }
 ```
 
-### 11.2 自定义节点类型
+### 12.2 自定义节点类型
 
 ```go
 type CustomNodeHandler interface {
@@ -1348,9 +1637,9 @@ func (h *EmailNodeHandler) Handle(node *Node, instance *WorkflowInstance) error 
 
 ---
 
-## 十二、安全性
+## 十三、安全性
 
-### 12.1 权限控制
+### 13.1 权限控制
 
 ```go
 type PermissionChecker interface {
@@ -1381,7 +1670,7 @@ func (c *RBACPermissionChecker) CanCompleteTask(userID string, taskID string) bo
 }
 ```
 
-### 12.2 数据加密
+### 13.2 数据加密
 
 ```go
 // 敏感变量加密存储
@@ -1407,14 +1696,516 @@ func (s *EncryptedVariableStore) Get(key string) (interface{}, error) {
 
 ---
 
-## 十三、总结
+## 十四、错误码定义
+
+### 14.1 错误码规范
+
+```go
+// 错误码格式：WXXYYYY
+// WX: 模块代码（10-流程定义, 20-流程实例, 30-任务, 40-系统）
+// YYYY: 具体错误编号
+
+type ErrorCode int
+
+const (
+    // 通用错误 (40xxxx)
+    ErrSuccess           ErrorCode = 0
+    ErrUnknown           ErrorCode = 400000
+    ErrInvalidParam      ErrorCode = 400001
+    ErrUnauthorized      ErrorCode = 400002
+    ErrForbidden         ErrorCode = 400003
+    ErrNotFound          ErrorCode = 400004
+    ErrTimeout           ErrorCode = 400005
+    ErrRateLimited       ErrorCode = 400006
+    ErrDatabaseError     ErrorCode = 400007
+    ErrLockFailed        ErrorCode = 400008
+    
+    // 流程定义错误 (10xxxx)
+    ErrWorkflowNotFound      ErrorCode = 100001
+    ErrWorkflowInactive      ErrorCode = 100002
+    ErrWorkflowVersionExists ErrorCode = 100003
+    ErrInvalidWorkflowDef    ErrorCode = 100004
+    ErrNodeNotFound          ErrorCode = 100005
+    ErrTransitionNotFound    ErrorCode = 100006
+    ErrInvalidNodeType       ErrorCode = 100007
+    ErrCyclicWorkflow        ErrorCode = 100008  // 循环依赖
+    ErrNoStartNode           ErrorCode = 100009
+    ErrNoEndNode             ErrorCode = 100010
+    ErrDisconnectedNode      ErrorCode = 100011  // 孤立节点
+    
+    // 流程实例错误 (20xxxx)
+    ErrInstanceNotFound      ErrorCode = 200001
+    ErrInstanceCompleted     ErrorCode = 200002
+    ErrInstanceSuspended     ErrorCode = 200003
+    ErrInstanceTerminated    ErrorCode = 200004
+    ErrNoValidTransition     ErrorCode = 200005
+    ErrConditionEvalFailed   ErrorCode = 200006
+    ErrVariableMissing       ErrorCode = 200007
+    ErrInvalidInstanceStatus ErrorCode = 200008
+    ErrRollbackNotAllowed    ErrorCode = 200009
+    
+    // 任务错误 (30xxxx)
+    ErrTaskNotFound        ErrorCode = 300001
+    ErrTaskCompleted       ErrorCode = 300002
+    ErrTaskCanceled        ErrorCode = 300003
+    ErrTaskAssigneeMismatch ErrorCode = 300004
+    ErrTaskDelegateNotAllowed ErrorCode = 300005
+    ErrCommentRequired     ErrorCode = 300006
+    ErrInvalidAction       ErrorCode = 300007
+    ErrTaskOverdue         ErrorCode = 300008
+)
+
+// WorkflowError 工作流错误
+type WorkflowError struct {
+    Code    ErrorCode `json:"code"`
+    Message string    `json:"message"`
+    Detail  string    `json:"detail,omitempty"`
+}
+
+func (e *WorkflowError) Error() string {
+    return fmt.Sprintf("[%d] %s: %s", e.Code, e.Message, e.Detail)
+}
+
+// 预定义错误
+var (
+    ErrLockFailedError = &WorkflowError{Code: ErrLockFailed, Message: "获取分布式锁失败"}
+    ErrWorkflowNotFoundError = &WorkflowError{Code: ErrWorkflowNotFound, Message: "工作流不存在"}
+    ErrTaskNotFoundError = &WorkflowError{Code: ErrTaskNotFound, Message: "任务不存在"}
+)
+```
+
+### 14.2 错误处理最佳实践
+
+```go
+// 统一错误响应
+type APIResponse struct {
+    Code    int         `json:"code"`
+    Message string      `json:"message"`
+    Data    interface{} `json:"data,omitempty"`
+    TraceID string      `json:"trace_id,omitempty"`
+}
+
+// 错误处理中间件
+func ErrorHandler() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        c.Next()
+        
+        if len(c.Errors) > 0 {
+            err := c.Errors.Last().Err
+            
+            var wfErr *WorkflowError
+            if errors.As(err, &wfErr) {
+                c.JSON(http.StatusOK, APIResponse{
+                    Code:    int(wfErr.Code),
+                    Message: wfErr.Message,
+                    TraceID: c.GetString("trace_id"),
+                })
+                return
+            }
+            
+            // 未知错误
+            c.JSON(http.StatusInternalServerError, APIResponse{
+                Code:    int(ErrUnknown),
+                Message: "服务器内部错误",
+                TraceID: c.GetString("trace_id"),
+            })
+        }
+    }
+}
+```
+
+---
+
+## 十五、配置管理
+
+### 15.1 配置结构
+
+```go
+// Config 工作流引擎配置
+type Config struct {
+    // 服务配置
+    Server ServerConfig `yaml:"server"`
+    
+    // 数据库配置
+    Database DatabaseConfig `yaml:"database"`
+    
+    // Redis配置
+    Redis RedisConfig `yaml:"redis"`
+    
+    // 消息队列配置
+    MessageQueue MQConfig `yaml:"message_queue"`
+    
+    // 引擎配置
+    Engine EngineConfig `yaml:"engine"`
+    
+    // 日志配置
+    Log LogConfig `yaml:"log"`
+}
+
+type ServerConfig struct {
+    Port         int           `yaml:"port" default:"8080"`
+    ReadTimeout  time.Duration `yaml:"read_timeout" default:"30s"`
+    WriteTimeout time.Duration `yaml:"write_timeout" default:"30s"`
+    Mode         string        `yaml:"mode" default:"release"` // debug/release
+}
+
+type DatabaseConfig struct {
+    Driver          string        `yaml:"driver" default:"mysql"`
+    DSN             string        `yaml:"dsn"`
+    MaxOpenConns    int           `yaml:"max_open_conns" default:"100"`
+    MaxIdleConns    int           `yaml:"max_idle_conns" default:"10"`
+    ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime" default:"1h"`
+}
+
+type RedisConfig struct {
+    Addr         string        `yaml:"addr" default:"localhost:6379"`
+    Password     string        `yaml:"password"`
+    DB           int           `yaml:"db" default:"0"`
+    PoolSize     int           `yaml:"pool_size" default:"100"`
+    MinIdleConns int           `yaml:"min_idle_conns" default:"10"`
+    DialTimeout  time.Duration `yaml:"dial_timeout" default:"5s"`
+}
+
+type MQConfig struct {
+    Type     string `yaml:"type" default:"kafka"` // kafka/rabbitmq
+    Brokers  string `yaml:"brokers"`
+    Topic    string `yaml:"topic" default:"workflow_events"`
+    GroupID  string `yaml:"group_id" default:"workflow_engine"`
+}
+
+type EngineConfig struct {
+    // 任务超时检查间隔
+    TimeoutCheckInterval time.Duration `yaml:"timeout_check_interval" default:"1m"`
+    
+    // 任务默认超时时间
+    DefaultTaskTimeout time.Duration `yaml:"default_task_timeout" default:"24h"`
+    
+    // 工作协程数
+    WorkerCount int `yaml:"worker_count" default:"10"`
+    
+    // 任务队列大小
+    TaskQueueSize int `yaml:"task_queue_size" default:"1000"`
+    
+    // 是否启用异步处理
+    EnableAsync bool `yaml:"enable_async" default:"true"`
+    
+    // 分布式锁过期时间
+    LockTTL time.Duration `yaml:"lock_ttl" default:"30s"`
+    
+    // 流程定义缓存时间
+    WorkflowCacheTTL time.Duration `yaml:"workflow_cache_ttl" default:"1h"`
+}
+
+type LogConfig struct {
+    Level      string `yaml:"level" default:"info"`
+    Format     string `yaml:"format" default:"json"` // json/text
+    OutputPath string `yaml:"output_path" default:"stdout"`
+}
+```
+
+### 15.2 配置文件示例
+
+```yaml
+# config.yaml
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  mode: release
+
+database:
+  driver: mysql
+  dsn: "user:password@tcp(localhost:3306)/workflow?charset=utf8mb4&parseTime=True&loc=Local"
+  max_open_conns: 100
+  max_idle_conns: 10
+  conn_max_lifetime: 1h
+
+redis:
+  addr: localhost:6379
+  password: ""
+  db: 0
+  pool_size: 100
+
+message_queue:
+  type: kafka
+  brokers: localhost:9092
+  topic: workflow_events
+  group_id: workflow_engine
+
+engine:
+  timeout_check_interval: 1m
+  default_task_timeout: 24h
+  worker_count: 10
+  task_queue_size: 1000
+  enable_async: true
+  lock_ttl: 30s
+  workflow_cache_ttl: 1h
+
+log:
+  level: info
+  format: json
+  output_path: /var/log/workflow/app.log
+```
+
+### 15.3 环境变量覆盖
+
+```go
+// 支持通过环境变量覆盖配置
+// 格式：WORKFLOW_${SECTION}_${KEY}
+// 例如：WORKFLOW_DATABASE_DSN, WORKFLOW_SERVER_PORT
+
+func LoadConfig(path string) (*Config, error) {
+    viper.SetConfigFile(path)
+    viper.SetEnvPrefix("WORKFLOW")
+    viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+    viper.AutomaticEnv()
+    
+    if err := viper.ReadInConfig(); err != nil {
+        return nil, err
+    }
+    
+    var config Config
+    if err := viper.Unmarshal(&config); err != nil {
+        return nil, err
+    }
+    
+    return &config, nil
+}
+```
+
+---
+
+## 十六、流程定义验证
+
+### 16.1 验证器接口
+
+```go
+// WorkflowValidator 流程定义验证器
+type WorkflowValidator interface {
+    Validate(workflow *Workflow) []ValidationError
+}
+
+// ValidationError 验证错误
+type ValidationError struct {
+    Field   string `json:"field"`
+    Code    string `json:"code"`
+    Message string `json:"message"`
+}
+
+// DefaultWorkflowValidator 默认验证器实现
+type DefaultWorkflowValidator struct{}
+
+func (v *DefaultWorkflowValidator) Validate(workflow *Workflow) []ValidationError {
+    var errors []ValidationError
+    
+    // 1. 基础验证
+    if workflow.Name == "" {
+        errors = append(errors, ValidationError{
+            Field:   "name",
+            Code:    "required",
+            Message: "工作流名称不能为空",
+        })
+    }
+    
+    // 2. 节点验证
+    errors = append(errors, v.validateNodes(workflow)...)
+    
+    // 3. 转换验证
+    errors = append(errors, v.validateTransitions(workflow)...)
+    
+    // 4. 结构验证
+    errors = append(errors, v.validateStructure(workflow)...)
+    
+    return errors
+}
+
+func (v *DefaultWorkflowValidator) validateNodes(workflow *Workflow) []ValidationError {
+    var errors []ValidationError
+    
+    hasStart := false
+    hasEnd := false
+    nodeIDs := make(map[string]bool)
+    
+    for i, node := range workflow.Nodes {
+        // 检查节点ID唯一性
+        if nodeIDs[node.ID] {
+            errors = append(errors, ValidationError{
+                Field:   fmt.Sprintf("nodes[%d].id", i),
+                Code:    "duplicate",
+                Message: fmt.Sprintf("节点ID重复: %s", node.ID),
+            })
+        }
+        nodeIDs[node.ID] = true
+        
+        // 检查开始节点
+        if node.Type == StartNode {
+            if hasStart {
+                errors = append(errors, ValidationError{
+                    Field:   fmt.Sprintf("nodes[%d]", i),
+                    Code:    "multiple_start",
+                    Message: "流程只能有一个开始节点",
+                })
+            }
+            hasStart = true
+        }
+        
+        // 检查结束节点
+        if node.Type == EndNode {
+            hasEnd = true
+        }
+        
+        // 审批节点必须有审批人规则
+        if node.Type == ApprovalNode {
+            if node.Assignee.Type == "" {
+                errors = append(errors, ValidationError{
+                    Field:   fmt.Sprintf("nodes[%d].assignee", i),
+                    Code:    "required",
+                    Message: fmt.Sprintf("审批节点[%s]必须设置审批人规则", node.Name),
+                })
+            }
+        }
+    }
+    
+    if !hasStart {
+        errors = append(errors, ValidationError{
+            Field:   "nodes",
+            Code:    "no_start_node",
+            Message: "流程必须有一个开始节点",
+        })
+    }
+    
+    if !hasEnd {
+        errors = append(errors, ValidationError{
+            Field:   "nodes",
+            Code:    "no_end_node",
+            Message: "流程必须有至少一个结束节点",
+        })
+    }
+    
+    return errors
+}
+
+func (v *DefaultWorkflowValidator) validateStructure(workflow *Workflow) []ValidationError {
+    var errors []ValidationError
+    
+    // 构建邻接表
+    graph := make(map[string][]string)
+    inDegree := make(map[string]int)
+    
+    for _, node := range workflow.Nodes {
+        graph[node.ID] = []string{}
+        inDegree[node.ID] = 0
+    }
+    
+    for _, trans := range workflow.Transitions {
+        graph[trans.From] = append(graph[trans.From], trans.To)
+        inDegree[trans.To]++
+    }
+    
+    // 检查孤立节点（除开始节点外）
+    for _, node := range workflow.Nodes {
+        if node.Type != StartNode && inDegree[node.ID] == 0 {
+            errors = append(errors, ValidationError{
+                Field:   "nodes",
+                Code:    "disconnected_node",
+                Message: fmt.Sprintf("节点[%s]没有入口转换", node.Name),
+            })
+        }
+    }
+    
+    // 检查循环依赖（使用DFS）
+    if hasCycle(graph) {
+        errors = append(errors, ValidationError{
+            Field:   "transitions",
+            Code:    "cyclic_dependency",
+            Message: "流程存在循环依赖",
+        })
+    }
+    
+    return errors
+}
+
+// hasCycle 检测图中是否有循环
+func hasCycle(graph map[string][]string) bool {
+    visited := make(map[string]int) // 0: 未访问, 1: 访问中, 2: 已完成
+    
+    var dfs func(node string) bool
+    dfs = func(node string) bool {
+        visited[node] = 1
+        
+        for _, next := range graph[node] {
+            if visited[next] == 1 {
+                return true // 发现环
+            }
+            if visited[next] == 0 && dfs(next) {
+                return true
+            }
+        }
+        
+        visited[node] = 2
+        return false
+    }
+    
+    for node := range graph {
+        if visited[node] == 0 {
+            if dfs(node) {
+                return true
+            }
+        }
+    }
+    
+    return false
+}
+```
+
+---
+
+## 十七、总结
 
 这是一个完整的工作流引擎设计方案，涵盖了：
 
-1. **核心功能**：流程定义、实例管理、任务管理
-2. **高级特性**：条件分支、并行网关、子流程、超时处理
-3. **灵活性**：插件系统、自定义节点、表达式引擎
-4. **可靠性**：事件驱动、异步处理、异常处理
-5. **可维护性**：清晰的分层架构、完善的监控日志
+1. **系统架构**：清晰的分层架构、核心组件说明
+2. **核心功能**：流程定义、实例管理、任务管理
+3. **高级特性**：条件分支、并行网关、子流程、超时处理
+4. **可靠性保障**：分布式锁、幂等性设计、事件驱动
+5. **完善的接口**：仓储接口、外部服务接口、分布式锁接口
+6. **错误处理**：完整的错误码定义、统一错误响应
+7. **配置管理**：灵活的配置结构、环境变量支持
+8. **流程验证**：完整的流程定义验证器
 
-可以根据实际业务需求逐步实现各个模块，先实现基础功能，再逐步添加高级特性。
+### 实施路线图
+
+**第一阶段（基础功能）- 2-3周**
+- 数据模型和数据库设计
+- 基础CRUD接口
+- 简单的串行审批流程
+
+**第二阶段（核心功能）- 3-4周**
+- 条件分支和路由
+- 并行网关（会签/或签）
+- 任务超时处理
+- 事件通知
+
+**第三阶段（高级功能）- 2-3周**
+- 子流程支持
+- 加签/减签
+- 流程回退
+- 任务委托
+
+**第四阶段（可靠性）- 2周**
+- 分布式锁
+- 幂等性保证
+- 异步处理
+- 性能优化
+
+**第五阶段（运维支持）- 1-2周**
+- 监控告警
+- 日志追踪
+- 配置管理
+- 文档完善
+
+---
+
+**文档版本**：v2.0  
+**最后更新**：2025-12-31  
+**维护者**：工作流引擎团队
