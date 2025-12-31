@@ -41,23 +41,11 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 
 		// 确保目标地址有效
 		if !strings.Contains(targetAddr, ":") {
-			targetAddr += ":80" // 默认 HTTP 端口
+			targetAddr += ":443" // CONNECT 默认是 HTTPS 端口
 		}
 
-		// 2. 建立与目标服务器的 TCP 连接
-		destConn, err := net.DialTimeout("tcp", targetAddr, 5*time.Second)
-		if err != nil {
-			http.Error(w, "无法连接到目标服务器: "+err.Error(), http.StatusServiceUnavailable)
-			log.Printf("连接失败到 %s: %v", targetAddr, err)
-			return
-		}
-
-		// 3. 告知客户端连接已建立
-		// 代理回复 200 OK，表示隧道已准备好
-		w.WriteHeader(http.StatusOK)
-
-		// 4. 劫持客户端连接 (Hijack)
-		// 这一步是为了拿到原始的底层 TCP 连接，而不是 HTTP 响应流
+		// 2. 先 Hijack 客户端连接
+		// 必须在建立目标连接前 Hijack，这样可以完全控制响应的发送
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
 			log.Println("ResponseWriter 不支持 Hijacker")
@@ -67,14 +55,37 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 		clientConn, _, err := hijacker.Hijack()
 		if err != nil {
 			log.Printf("Hijack 失败: %v", err)
-			http.Error(w, "无法劫持客户端连接", http.StatusInternalServerError)
+			return
+		}
+		defer clientConn.Close()
+
+		// 3. 建立与目标服务器的 TCP 连接
+		destConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+		if err != nil {
+			// 手动发送错误响应
+			clientConn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\n\r\n"))
+			log.Printf("连接失败到 %s: %v", targetAddr, err)
+			return
+		}
+		defer destConn.Close()
+
+		// 4. 手动发送 200 Connection Established 响应
+		// 这是 CONNECT 方法的标准响应格式
+		_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		if err != nil {
+			log.Printf("发送响应失败: %v", err)
 			return
 		}
 
 		// 5. 启动双向数据转发 (隧道)
-		// 一旦隧道建立，代理的工作就是将字节从一端复制到另一端，不再关心 HTTP 协议。
-		go transfer(destConn, clientConn)
-		go transfer(clientConn, destConn)
+		// 使用 channel 来同步两个方向的转发完成
+		done := make(chan struct{}, 2)
+		go transferWithSignal(destConn, clientConn, done)
+		go transferWithSignal(clientConn, destConn, done)
+
+		// 等待其中一个方向完成（通常是其中一方关闭连接）
+		<-done
+		// 此时另一个方向也会因为连接关闭而结束
 
 	} else {
 		// 对于非 CONNECT 请求（普通 HTTP），可以进行简单的 HTTP 转发
@@ -82,18 +93,17 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// 双向数据转发函数
-func transfer(destination io.WriteCloser, source io.ReadCloser) {
-	defer destination.Close()
-	defer source.Close()
-
+// 双向数据转发函数（带完成信号）
+func transferWithSignal(destination io.Writer, source io.Reader, done chan struct{}) {
 	// 将数据从 source 复制到 destination
 	// io.Copy 会一直阻塞直到 EOF 或发生错误
-	if _, err := io.Copy(destination, source); err != nil {
-		// 在隧道关闭时，通常会收到 io.EOF 或 net.OpError，可以忽略
-		if !strings.Contains(err.Error(), "use of closed network connection") {
-			// log.Printf("数据转发错误: %v", err) // 生产环境可以根据需要开启
-		}
+	io.Copy(destination, source)
+
+	// 转发完成，发送信号
+	// 使用 select 防止向已关闭的 channel 发送
+	select {
+	case done <- struct{}{}:
+	default:
 	}
 }
 
